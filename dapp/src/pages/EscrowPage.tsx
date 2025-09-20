@@ -12,7 +12,7 @@ import BalancesPanel from "../components/BalancesPanel";
 import CountdownChip from "../components/CountdownChip";
 
 // -----------------------------
-// Minimal ABIs (unchanged)
+// Minimal ABIs
 // -----------------------------
 const ESCROW_ABI = [
   "function createDeal(address partyB, uint64 deadline, uint96 usdA_8d, uint96 usdB_8d, bool unwrapToBNB) returns (uint256)",
@@ -40,7 +40,7 @@ const FEED_ABI = [
 ];
 
 // -----------------------------
-// Helpers (unchanged)
+// Helpers
 // -----------------------------
 const toBigInt = (v: ethers.BigNumberish) => BigInt(v.toString());
 const E8 = (n: number) => BigInt(Math.round(n * 1e8));
@@ -48,9 +48,8 @@ const fmt = (v: bigint, d = 18) => ethers.formatUnits(v, d);
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
 
 function usdToToken(usd8d: bigint, price: bigint, priceDecs: number, tokenDecs: number) {
-  const usdScaled = priceDecs >= 8
-    ? usd8d * 10n ** BigInt(priceDecs - 8)
-    : usd8d / 10n ** BigInt(8 - priceDecs);
+  const usdScaled =
+    priceDecs >= 8 ? usd8d * 10n ** BigInt(priceDecs - 8) : usd8d / 10n ** BigInt(8 - priceDecs);
   const numerator = usdScaled * 10n ** BigInt(tokenDecs);
   return ceilDiv(numerator, price);
 }
@@ -61,10 +60,13 @@ function short(addr?: string) {
 }
 
 // -----------------------------
-// Main Page (logic unchanged; UI split out)
+// Main Page
 // -----------------------------
 export default function EscrowPage() {
-  // web3 basics
+  // read-only provider (works pre-connect)
+  const [readProvider, setReadProvider] = useState<ethers.BrowserProvider | ethers.JsonRpcProvider | null>(null);
+
+  // wallet-bound provider/signer (for writes)
   const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null);
   const [signer, setSigner] = useState<ethers.Signer | null>(null);
   const [account, setAccount] = useState<string>("");
@@ -81,6 +83,7 @@ export default function EscrowPage() {
   // link/persistence
   const [copied, setCopied] = useState<boolean>(false);
   const [viewOnly, setViewOnly] = useState<boolean>(false);
+  const [linkChain, setLinkChain] = useState<number | null>(null);
 
   // countdowns
   const [deadlineTs, setDeadlineTs] = useState<number | null>(null);
@@ -95,7 +98,12 @@ export default function EscrowPage() {
 
   // deal & funding
   const [dealId, setDealId] = useState<number | null>(null);
-  const [status, setStatus] = useState({ priceLocked: false, fundedA: false, fundedB: false, settled: false });
+  const [status, setStatus] = useState({
+    priceLocked: false,
+    fundedA: false,
+    fundedB: false,
+    settled: false,
+  });
   const [needWBNB, setNeedWBNB] = useState<bigint | null>(null);
   const [needUSDT, setNeedUSDT] = useState<bigint | null>(null);
   const [computing, setComputing] = useState<boolean>(false);
@@ -105,8 +113,66 @@ export default function EscrowPage() {
   // balances
   const [partyAOnchain, setPartyAOnchain] = useState<string>("");
   const [partyBOnchain, setPartyBOnchain] = useState<string>("");
-  const [bal, setBal] = useState<{A_USDT?: bigint; A_WBNB?: bigint; A_BNB?: bigint; B_USDT?: bigint; B_WBNB?: bigint; B_BNB?: bigint; usdtD?: number; wbnbD?: number;}>({});
+  const [bal, setBal] = useState<{
+    A_USDT?: bigint;
+    A_WBNB?: bigint;
+    A_BNB?: bigint;
+    B_USDT?: bigint;
+    B_WBNB?: bigint;
+    B_BNB?: bigint;
+    usdtD?: number;
+    wbnbD?: number;
+  }>({});
 
+  // ---- NEW: locking state for address fields ----
+  const [escrowHasCode, setEscrowHasCode] = useState(false);
+  const [overrideAddrs, setOverrideAddrs] = useState(false);
+
+  // read provider init
+  useEffect(() => {
+    const anyWin = window as any;
+    (async () => {
+      try {
+        if (anyWin?.ethereum) {
+          setReadProvider(new ethers.BrowserProvider(anyWin.ethereum)); // no account prompt
+          return;
+        }
+      } catch {}
+      const FALLBACK_RPC =
+        (import.meta as any)?.env?.VITE_READ_RPC ||
+        localStorage.getItem("READ_RPC") ||
+        "http://127.0.0.1:8545";
+      setReadProvider(new ethers.JsonRpcProvider(FALLBACK_RPC));
+    })();
+  }, []);
+
+  // helper to get current read runner
+  const getRunner = useCallback(() => readProvider ?? provider ?? null, [readProvider, provider]);
+
+  // on-chain code existence check
+  const hasCode = useCallback(
+    async (addr?: string) => {
+      try {
+        const run: any = getRunner();
+        if (!run || !addr || !ethers.isAddress(addr)) return false;
+        const code = await run.getCode(addr);
+        return code && code !== "0x";
+      } catch {
+        return false;
+      }
+    },
+    [getRunner]
+  );
+
+  // keep escrowHasCode updated
+  useEffect(() => {
+    (async () => {
+      if (!escrowAddr) return setEscrowHasCode(false);
+      setEscrowHasCode(await hasCode(escrowAddr));
+    })();
+  }, [escrowAddr, hasCode]);
+
+  // role
   const role = useMemo(() => {
     if (!account || !partyAOnchain || !partyBOnchain) return "Unknown";
     const acc = account.toLowerCase();
@@ -119,30 +185,108 @@ export default function EscrowPage() {
   const connect = useCallback(async () => {
     try {
       const anyWin = window as any;
-      if (!anyWin.ethereum) { setError("MetaMask not found. Please install it."); return; }
+      if (!anyWin.ethereum) {
+        setError("MetaMask not found. Please install it.");
+        return;
+      }
       const prov = new ethers.BrowserProvider(anyWin.ethereum);
       await prov.send("eth_requestAccounts", []);
       const sg = await prov.getSigner();
       const acc = await sg.getAddress();
       const net = await prov.getNetwork();
-      setProvider(prov); setSigner(sg); setAccount(acc); setChainId(Number(net.chainId)); setError("");
-      anyWin.ethereum?.on?.("accountsChanged", async () => { const s = await prov.getSigner(); setSigner(s); setAccount(await s.getAddress()); });
-      anyWin.ethereum?.on?.("chainChanged", async () => { const n = await prov.getNetwork(); setChainId(Number(n.chainId)); });
-    } catch (e:any) { console.error(e); setError(e?.shortMessage || e?.message || "Failed to connect wallet"); }
+      setProvider(prov);
+      setSigner(sg);
+      setAccount(acc);
+      setChainId(Number(net.chainId));
+      setError("");
+      anyWin.ethereum?.on?.("accountsChanged", async () => {
+        const s = await prov.getSigner();
+        setSigner(s);
+        setAccount(await s.getAddress());
+      });
+      anyWin.ethereum?.on?.("chainChanged", async () => {
+        const n = await prov.getNetwork();
+        setChainId(Number(n.chainId));
+      });
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.shortMessage || e?.message || "Failed to connect wallet");
+    }
   }, []);
 
-  // instances
-  const escrow = useMemo(() => (signer && escrowAddr && ethers.isAddress(escrowAddr)) ? new ethers.Contract(escrowAddr, ESCROW_ABI, signer) : null, [signer, escrowAddr]);
-  const usdt   = useMemo(() => (signer && usdtAddr && ethers.isAddress(usdtAddr)) ? new ethers.Contract(usdtAddr, ERC20_ABI, signer) : null, [signer, usdtAddr]);
-  const wbnb   = useMemo(() => (signer && wbnbAddr && ethers.isAddress(wbnbAddr)) ? new ethers.Contract(wbnbAddr, ERC20_ABI, signer) : null, [signer, wbnbAddr]);
-  const feedBNB  = useMemo(() => (provider && bnbUsdFeed && ethers.isAddress(bnbUsdFeed)) ? new ethers.Contract(bnbUsdFeed, FEED_ABI, provider) : null, [provider, bnbUsdFeed]);
-  const feedUSDT = useMemo(() => (provider && usdtUsdFeed && ethers.isAddress(usdtUsdFeed)) ? new ethers.Contract(usdtUsdFeed, FEED_ABI, provider) : null, [provider, usdtUsdFeed]);
+  // instances (write-capable)
+  const escrow = useMemo(
+    () =>
+      signer && escrowAddr && ethers.isAddress(escrowAddr)
+        ? new ethers.Contract(escrowAddr, ESCROW_ABI, signer)
+        : null,
+    [signer, escrowAddr]
+  );
+  const usdt = useMemo(
+    () =>
+      signer && usdtAddr && ethers.isAddress(usdtAddr)
+        ? new ethers.Contract(usdtAddr, ERC20_ABI, signer)
+        : null,
+    [signer, usdtAddr]
+  );
+  const wbnb = useMemo(
+    () =>
+      signer && wbnbAddr && ethers.isAddress(wbnbAddr)
+        ? new ethers.Contract(wbnbAddr, ERC20_ABI, signer)
+        : null,
+    [signer, wbnbAddr]
+  );
+
+  // read-only instances (prefer readProvider; fallback to provider)
+  const runner = getRunner();
+
+  const escrowRead = useMemo(
+    () =>
+      runner && escrowAddr && ethers.isAddress(escrowAddr)
+        ? new ethers.Contract(escrowAddr, ESCROW_ABI, runner)
+        : null,
+    [runner, escrowAddr]
+  );
+
+  const feedBNB = useMemo(
+    () =>
+      runner && bnbUsdFeed && ethers.isAddress(bnbUsdFeed)
+        ? new ethers.Contract(bnbUsdFeed, FEED_ABI, runner)
+        : null,
+    [runner, bnbUsdFeed]
+  );
+
+  const feedUSDT = useMemo(
+    () =>
+      runner && usdtUsdFeed && ethers.isAddress(usdtUsdFeed)
+        ? new ethers.Contract(usdtUsdFeed, FEED_ABI, runner)
+        : null,
+    [runner, usdtUsdFeed]
+  );
+
+  const usdtRead = useMemo(
+    () =>
+      runner && usdtAddr && ethers.isAddress(usdtAddr)
+        ? new ethers.Contract(usdtAddr, ERC20_ABI, runner)
+        : null,
+    [runner, usdtAddr]
+  );
+
+  const wbnbRead = useMemo(
+    () =>
+      runner && wbnbAddr && ethers.isAddress(wbnbAddr)
+        ? new ethers.Contract(wbnbAddr, ERC20_ABI, runner)
+        : null,
+    [runner, wbnbAddr]
+  );
 
   // URL sync
   const syncToURL = useCallback(() => {
     const u = new URL(window.location.href);
     const p = u.searchParams;
-    ["escrow","usdt","wbnb","bnbUsdFeed","usdtUsdFeed","deal","chain"].forEach(k => p.delete(k));
+    ["escrow", "usdt", "wbnb", "bnbUsdFeed", "usdtUsdFeed", "deal", "chain"].forEach((k) =>
+      p.delete(k)
+    );
     if (escrowAddr) p.set("escrow", escrowAddr);
     if (usdtAddr) p.set("usdt", usdtAddr);
     if (wbnbAddr) p.set("wbnb", wbnbAddr);
@@ -156,75 +300,183 @@ export default function EscrowPage() {
 
   const copyShare = useCallback(async () => {
     syncToURL();
-    try { await navigator.clipboard.writeText(window.location.href); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
   }, [syncToURL]);
 
   const resetAll = useCallback(() => {
-    const u = new URL(window.location.href); u.search = ""; window.history.replaceState({}, "", u.pathname);
+    const u = new URL(window.location.href);
+    u.search = "";
+    window.history.replaceState({}, "", u.pathname);
     localStorage.removeItem("escrow-demo:last");
-    setEscrowAddr(""); setUsdtAddr(""); setWbnbAddr(""); setBnbUsdFeed(""); setUsdtUsdFeed("");
-    setPartyB(""); setUsdAmount(20); setDeadlineHrs(72); setUnwrapToBNB(false);
-    setDealId(null); setStatus({priceLocked:false,fundedA:false,fundedB:false,settled:false});
-    setNeedWBNB(null); setNeedUSDT(null); setViewOnly(false); setCopied(false);
-    setPartyAOnchain(""); setPartyBOnchain(""); setBal({}); setError("");
-    setDeadlineTs(null); setTimeLeft(null);
+    setEscrowAddr("");
+    setUsdtAddr("");
+    setWbnbAddr("");
+    setBnbUsdFeed("");
+    setUsdtUsdFeed("");
+    setPartyB("");
+    setUsdAmount(20);
+    setDeadlineHrs(72);
+    setUnwrapToBNB(false);
+    setDealId(null);
+    setStatus({ priceLocked: false, fundedA: false, fundedB: false, settled: false });
+    setNeedWBNB(null);
+    setNeedUSDT(null);
+    setViewOnly(false);
+    setCopied(false);
+    setPartyAOnchain("");
+    setPartyBOnchain("");
+    setBal({});
+    setError("");
+    setDeadlineTs(null);
+    setTimeLeft(null);
+    setLinkChain(null);
+    setOverrideAddrs(false);
+    setEscrowHasCode(false);
   }, []);
 
+  // read query string / localStorage
   useEffect(() => {
     const q = new URL(window.location.href).searchParams;
     const fromStore = localStorage.getItem("escrow-demo:last");
-    const ps = q.toString() ? q : (fromStore ? new URLSearchParams(fromStore) : null);
+    const ps = q.toString() ? q : fromStore ? new URLSearchParams(fromStore) : null;
     if (!ps) return;
-    const e = ps.get("escrow"); if (e) setEscrowAddr(e);
-    const u = ps.get("usdt"); if (u) setUsdtAddr(u);
-    const w = ps.get("wbnb"); if (w) setWbnbAddr(w);
-    const bf = ps.get("bnbUsdFeed"); if (bf) setBnbUsdFeed(bf);
-    const uf = ps.get("usdtUsdFeed"); if (uf) setUsdtUsdFeed(uf);
-    const d = ps.get("deal"); if (d) { setDealId(Number(d)); setViewOnly(true); }
+    const e = ps.get("escrow");
+    if (e) setEscrowAddr(e);
+    const u = ps.get("usdt");
+    if (u) setUsdtAddr(u);
+    const w = ps.get("wbnb");
+    if (w) setWbnbAddr(w);
+    const bf = ps.get("bnbUsdFeed");
+    if (bf) setBnbUsdFeed(bf);
+    const uf = ps.get("usdtUsdFeed");
+    if (uf) setUsdtUsdFeed(uf);
+    const d = ps.get("deal");
+    if (d) {
+      setDealId(Number(d));
+      setViewOnly(true);
+    }
+    const c = ps.get("chain");
+    if (c && !Number.isNaN(Number(c))) setLinkChain(Number(c));
   }, []);
 
-  useEffect(() => { syncToURL(); }, [syncToURL]);
+  useEffect(() => {
+    syncToURL();
+  }, [syncToURL]);
 
+  // OPTIONAL: auto-load addresses from /addresses.json
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/addresses.json");
+        if (!res.ok) return;
+        const j = await res.json();
+        if (!escrowAddr && j.ESCROW) setEscrowAddr(j.ESCROW);
+        if (!usdtAddr && j.USDT) setUsdtAddr(j.USDT);
+        if (!wbnbAddr && j.WBNB) setWbnbAddr(j.WBNB);
+        if (!bnbUsdFeed && j.BNB_USD) setBnbUsdFeed(j.BNB_USD);
+        if (!usdtUsdFeed && j.USDT_USD) setUsdtUsdFeed(j.USDT_USD);
+      } catch {}
+    })();
+  }, []); // run once
+
+  // auto-fill from escrow
   const loadFromEscrow = useCallback(async () => {
-    if (!escrow) return;
+    if (!escrowAddr || !escrowRead) return;
+    if (!(await hasCode(escrowAddr))) {
+      console.warn("Escrow address has no code on current RPC:", escrowAddr);
+      return;
+    }
     try {
       const [usdtA, wbnbA, bnbF, usdtF] = await Promise.all([
-        escrow.USDT(), escrow.WBNB(), escrow.BNB_USD(), escrow.USDT_USD()
+        escrowRead.USDT(),
+        escrowRead.WBNB(),
+        escrowRead.BNB_USD(),
+        escrowRead.USDT_USD(),
       ]);
-      if (!usdtAddr) setUsdtAddr(usdtA);
-      if (!wbnbAddr) setWbnbAddr(wbnbA);
-      if (!bnbUsdFeed) setBnbUsdFeed(bnbF);
-      if (!usdtUsdFeed) setUsdtUsdFeed(usdtF);
-    } catch (e) { console.warn("Failed to load addresses from escrow", e); }
-  }, [escrow, usdtAddr, wbnbAddr, bnbUsdFeed, usdtUsdFeed]);
+      setUsdtAddr((prev) => prev || usdtA);
+      setWbnbAddr((prev) => prev || wbnbA);
+      setBnbUsdFeed((prev) => prev || bnbF);
+      setUsdtUsdFeed((prev) => prev || usdtF);
+    } catch (e: any) {
+      console.warn("Auto-fill failed (escrow call):", e?.message || e);
+    }
+  }, [escrowAddr, escrowRead, hasCode]);
 
-  useEffect(() => { loadFromEscrow(); }, [loadFromEscrow]);
+  useEffect(() => {
+    loadFromEscrow();
+  }, [loadFromEscrow]);
 
+  // initiate
   const onInitiate = useCallback(async () => {
-    if (!escrow) { setError("Escrow address or signer missing"); return; }
-    if (!ethers.isAddress(partyB)) { setError("Invalid Party B address"); return; }
+    if (!escrow) {
+      setError("Escrow address or signer missing");
+      return;
+    }
+    if (!ethers.isAddress(partyB)) {
+      setError("Invalid Party B address");
+      return;
+    }
     try {
-      setCreating(true); setError("");
-      const deadline = BigInt(Math.floor(Date.now()/1000) + deadlineHrs * 3600);
+      setCreating(true);
+      setError("");
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineHrs * 3600);
       const usd8d = E8(usdAmount);
       const tx = await escrow.createDeal(partyB, deadline, usd8d, usd8d, unwrapToBNB);
       await tx.wait();
       let id: number | null = null;
-      try { const count: bigint = await escrow.getDealsCount(); id = Number(count - 1n); } catch {}
+      try {
+        const count: bigint = await escrow.getDealsCount();
+        id = Number(count - 1n);
+      } catch {}
       if (id === null) id = 0;
       setDealId(id);
       setViewOnly(true);
       syncToURL();
-    } catch (e:any) { console.error(e); setError(e?.shortMessage || e?.message || "Failed to create deal"); }
-    finally { setCreating(false); }
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.shortMessage || e?.message || "Failed to create deal");
+    } finally {
+      setCreating(false);
+    }
   }, [escrow, partyB, deadlineHrs, usdAmount, unwrapToBNB, syncToURL]);
 
-  const computeNeeds = useCallback( async () => {
-    if (!feedBNB || !feedUSDT || !usdt || !wbnb) { setError("Paste all 5 addresses first"); return; }
+  // compute
+  const computeNeeds = useCallback(async () => {
+    const feedB = feedBNB;
+    const feedU = feedUSDT;
+    const tUSDT = usdt ?? usdtRead;
+    const tWBNB = wbnb ?? wbnbRead;
+
+    if (!escrowAddr || !feedB || !feedU || !tUSDT || !tWBNB) {
+      setError("Paste/auto-fill all 5 addresses first");
+      return;
+    }
+
+    if (
+      !(await hasCode(escrowAddr)) ||
+      !(await hasCode(bnbUsdFeed)) ||
+      !(await hasCode(usdtUsdFeed)) ||
+      !(await hasCode(usdtAddr)) ||
+      !(await hasCode(wbnbAddr))
+    ) {
+      setError("One or more addresses are not deployed on this RPC/network.");
+      return;
+    }
+
     try {
-      setComputing(true); setError("");
+      setComputing(true);
+      setError("");
       const [bnbDecs, bnbRound, usdtDecs, uRound, wbnbDecs, usdtTokDecs] = await Promise.all([
-        feedBNB.decimals(), feedBNB.latestRoundData(), feedUSDT.decimals(), feedUSDT.latestRoundData(), wbnb.decimals(), usdt.decimals()
+        feedB.decimals(),
+        feedB.latestRoundData(),
+        feedU.decimals(),
+        feedU.latestRoundData(),
+        tWBNB.decimals(),
+        tUSDT.decimals(),
       ]);
       const bnbPrice = toBigInt(bnbRound[1]);
       const uPrice = toBigInt(uRound[1]);
@@ -234,78 +486,173 @@ export default function EscrowPage() {
       const usdtD = Number(usdtTokDecs.toString());
       const usd8d = E8(usdAmount);
       const wNeed = usdToToken(usd8d, bnbPrice, priceDecBNB, wbnbD);
-      const uNeed = usdToToken(usd8d, uPrice,  priceDecUSDT, usdtD);
-      setNeedWBNB(wNeed); setNeedUSDT(uNeed);
-    } catch (e:any) { console.error(e); setError(e?.shortMessage || e?.message || "Failed to compute amounts"); }
-    finally { setComputing(false); }
-  }, [feedBNB, feedUSDT, usdt, wbnb, usdAmount]);
+      const uNeed = usdToToken(usd8d, uPrice, priceDecUSDT, usdtD);
+      setNeedWBNB(wNeed);
+      setNeedUSDT(uNeed);
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.shortMessage || e?.message || "Failed to compute amounts");
+    } finally {
+      setComputing(false);
+    }
+  }, [
+    feedBNB,
+    feedUSDT,
+    usdt,
+    usdtRead,
+    wbnb,
+    wbnbRead,
+    usdAmount,
+    escrowAddr,
+    bnbUsdFeed,
+    usdtUsdFeed,
+    usdtAddr,
+    wbnbAddr,
+    hasCode,
+  ]);
 
-  const fundA = useCallback( async () => {
-    if (!escrow || dealId === null || needWBNB === null) { setError("Compute amounts first"); return; }
+  // fund
+  const fundA = useCallback(async () => {
+    if (!escrow || dealId === null || needWBNB === null) {
+      setError("Compute amounts first");
+      return;
+    }
     try {
-      setFundingA(true); setError("");
+      setFundingA(true);
+      setError("");
       const tx = await escrow.fundA_withBNB(dealId, { value: needWBNB });
       await tx.wait();
-    } catch (e:any) { console.error(e); setError(e?.shortMessage || e?.message || "Funding A failed"); }
-    finally { setFundingA(false); }
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.shortMessage || e?.message || "Funding A failed");
+    } finally {
+      setFundingA(false);
+    }
   }, [escrow, dealId, needWBNB]);
 
-  const fundB = useCallback( async () => {
-    if (!escrow || !usdt || dealId === null || needUSDT === null) { setError("Compute amounts first"); return; }
+  const fundB = useCallback(async () => {
+    if (!escrow || !usdt || dealId === null || needUSDT === null) {
+      setError("Compute amounts first");
+      return;
+    }
     try {
-      setFundingB(true); setError("");
+      setFundingB(true);
+      setError("");
       await (await usdt.approve(escrowAddr, needUSDT)).wait();
       await (await escrow.fundB_withUSDT(dealId)).wait();
-    } catch (e:any) { console.error(e); setError(e?.shortMessage || e?.message || "Funding B failed"); }
-    finally { setFundingB(false); }
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.shortMessage || e?.message || "Funding B failed");
+    } finally {
+      setFundingB(false);
+    }
   }, [escrow, usdt, dealId, needUSDT, escrowAddr]);
 
-  // Poll deal (captures deadline)
+  // Poll deal (read-only)
   useEffect(() => {
     let t: any;
     const tick = async () => {
-      if (!escrow || dealId === null) return;
+      if (!escrowRead || dealId === null) return;
       try {
-        const d = await escrow.deals(dealId);
-        setStatus({ priceLocked: d.priceLocked, fundedA: d.fundedA, fundedB: d.fundedB, settled: d.settled });
+        const d = await escrowRead.deals(dealId);
+        setStatus({
+          priceLocked: d.priceLocked,
+          fundedA: d.fundedA,
+          fundedB: d.fundedB,
+          settled: d.settled,
+        });
         setPartyAOnchain(d.partyA);
         setPartyBOnchain(d.partyB);
-        setDeadlineTs(Number(d.deadline)); // keep deadline updated
+        setDeadlineTs(Number(d.deadline));
       } catch {}
     };
-    if (dealId !== null) { tick(); t = setInterval(tick, 1200); }
-    return () => { if (t) clearInterval(t); };
-  }, [escrow, dealId]);
+    if (dealId !== null) {
+      tick();
+      t = setInterval(tick, 1200);
+    }
+    return () => {
+      if (t) clearInterval(t);
+    };
+  }, [escrowRead, dealId]);
 
-  // Live countdown from deadlineTs
+  // read network id (for hint)
+  const [readChainId, setReadChainId] = useState<number | null>(null);
   useEffect(() => {
-    if (deadlineTs === null) { setTimeLeft(null); return; }
+    (async () => {
+      try {
+        const run: any = getRunner();
+        if (!run) return;
+        const net = await run.getNetwork();
+        setReadChainId(Number(net.chainId));
+      } catch {}
+    })();
+  }, [getRunner]);
+
+  // Live countdown
+  useEffect(() => {
+    if (deadlineTs === null) {
+      setTimeLeft(null);
+      return;
+    }
     const update = () => {
       const now = Math.floor(Date.now() / 1000);
       setTimeLeft(Math.max(0, deadlineTs - now));
     };
-    update(); // initial tick
+    update();
     const id = window.setInterval(update, 1000);
     return () => window.clearInterval(id);
   }, [deadlineTs]);
 
+  // balances
   const refreshBalances = useCallback(async () => {
-    if (!escrow || dealId === null || !usdt || !wbnb || !provider) return;
-    const d = await escrow.deals(dealId);
+    if (!escrowRead || dealId === null || !(usdt || usdtRead) || !(wbnb || wbnbRead) || !(provider || readProvider)) return;
+    const d = await escrowRead.deals(dealId);
+    const tUSDT = usdt ?? usdtRead!;
+    const tWBNB = wbnb ?? wbnbRead!;
+    const p: any = provider ?? readProvider;
     const [usdtD, wbnbD, aUsdt, bUsdt, aW, bW, aBNB, bBNB] = await Promise.all([
-      usdt.decimals(), wbnb.decimals(),
-      usdt.balanceOf(d.partyA), usdt.balanceOf(d.partyB),
-      wbnb.balanceOf(d.partyA), wbnb.balanceOf(d.partyB),
-      provider.getBalance(d.partyA), provider.getBalance(d.partyB)
+      tUSDT.decimals(),
+      tWBNB.decimals(),
+      tUSDT.balanceOf(d.partyA),
+      tUSDT.balanceOf(d.partyB),
+      tWBNB.balanceOf(d.partyA),
+      tWBNB.balanceOf(d.partyB),
+      p.getBalance(d.partyA),
+      p.getBalance(d.partyB),
     ]);
-    setBal({ usdtD: Number(usdtD.toString()), wbnbD: Number(wbnbD.toString()), A_USDT: aUsdt, B_USDT: bUsdt, A_WBNB: aW, B_WBNB: bW, A_BNB: aBNB, B_BNB: bBNB });
-  }, [escrow, dealId, usdt, wbnb, provider]);
+    setBal({
+      usdtD: Number(usdtD.toString()),
+      wbnbD: Number(wbnbD.toString()),
+      A_USDT: aUsdt,
+      B_USDT: bUsdt,
+      A_WBNB: aW,
+      B_WBNB: bW,
+      A_BNB: aBNB,
+      B_BNB: bBNB,
+    });
+  }, [escrowRead, dealId, usdt, usdtRead, wbnb, wbnbRead, provider, readProvider]);
 
-  useEffect(() => { if (status.settled) { refreshBalances(); } }, [status.settled, refreshBalances]);
+  useEffect(() => {
+    if (status.settled) {
+      refreshBalances();
+    }
+  }, [status.settled, refreshBalances]);
 
   const connected = !!account && !!provider;
   const onLocal = chainId === 31337 || chainId === 1337;
   const activeStep = !connected ? 1 : dealId === null ? 2 : !status.settled ? 3 : 4;
+
+  // mismatch hint
+  const showReadHint = readChainId !== null && linkChain !== null && readChainId !== linkChain;
+
+  // ---- LOCK STATES ----
+  const lockEscrow = viewOnly; // lock entire form in deal mode for escrow input
+  const lockDeps = (escrowHasCode && !overrideAddrs) || viewOnly; // lock derived deps
+  const lockReason = viewOnly
+    ? "Deal link — addresses locked for audit"
+    : escrowHasCode
+    ? "Addresses are derived from the escrow. Unlock to override."
+    : "";
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden bg-slate-950 text-slate-100">
@@ -319,10 +666,18 @@ export default function EscrowPage() {
       <div className="relative mx-auto max-w-5xl px-6 py-10">
         <Header onLocal={onLocal} chainId={chainId} activeStep={activeStep} />
 
+        {showReadHint && (
+          <div className="mt-3 rounded-lg border border-amber-400/30 bg-amber-500/10 text-amber-200 px-3 py-2 text-xs">
+            Reading from chain {readChainId}, but link targets chain {linkChain}. Set <code>VITE_READ_RPC</code> (or <code>localStorage.READ_RPC</code>) to the correct network RPC for read-only mode.
+          </div>
+        )}
+
         <ConnectCard connected={connected} onConnect={connect} account={account} chainId={chainId} onLocal={onLocal} error={error} />
 
         {dealId !== null && connected && (
-          <div className="mt-3"><RoleBadge role={role as any} /></div>
+          <div className="mt-3">
+            <RoleBadge role={role as any} />
+          </div>
         )}
 
         <div className="mt-6 rounded-3xl p-[1px] bg-gradient-to-br from-white/10 via-white/5 to-transparent">
@@ -330,28 +685,47 @@ export default function EscrowPage() {
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-300">Contracts & Feeds</h2>
               <div className="flex items-center gap-2 text-[11px]">
-                <button onClick={resetAll} className="rounded-lg bg-rose-600 hover:bg-rose-500 px-3 py-1.5">New Deal</button>
+                <button onClick={resetAll} className="rounded-lg bg-rose-600 hover:bg-rose-500 px-3 py-1.5">
+                  New Deal
+                </button>
               </div>
             </div>
 
             <AddressForm
-              escrowAddr={escrowAddr} setEscrowAddr={setEscrowAddr}
-              usdtAddr={usdtAddr} setUsdtAddr={setUsdtAddr}
-              wbnbAddr={wbnbAddr} setWbnbAddr={setWbnbAddr}
-              bnbUsdFeed={bnbUsdFeed} setBnbUsdFeed={setBnbUsdFeed}
-              usdtUsdFeed={usdtUsdFeed} setUsdtUsdFeed={setUsdtUsdFeed}
+              escrowAddr={escrowAddr}
+              setEscrowAddr={setEscrowAddr}
+              usdtAddr={usdtAddr}
+              setUsdtAddr={setUsdtAddr}
+              wbnbAddr={wbnbAddr}
+              setWbnbAddr={setWbnbAddr}
+              bnbUsdFeed={bnbUsdFeed}
+              setBnbUsdFeed={setBnbUsdFeed}
+              usdtUsdFeed={usdtUsdFeed}
+              setUsdtUsdFeed={setUsdtUsdFeed}
               loadFromEscrow={loadFromEscrow}
               copyShare={copyShare}
               copied={copied}
-              escrow={escrow}
+              escrow={escrowRead || escrow}
+
+              // LOCKING
+              readOnlyEscrow={lockEscrow}
+              readOnlyDeps={lockDeps}
+              disabledReason={lockReason}
+              showLockToggle={escrowHasCode && !viewOnly}
+              onUnlock={() => setOverrideAddrs(true)}
+              onLock={() => setOverrideAddrs(false)}
             />
 
             {!viewOnly && (
               <InitiateForm
-                partyB={partyB} setPartyB={setPartyB}
-                usdAmount={usdAmount} setUsdAmount={setUsdAmount}
-                deadlineHrs={deadlineHrs} setDeadlineHrs={setDeadlineHrs}
-                unwrapToBNB={unwrapToBNB} setUnwrapToBNB={setUnwrapToBNB}
+                partyB={partyB}
+                setPartyB={setPartyB}
+                usdAmount={usdAmount}
+                setUsdAmount={setUsdAmount}
+                deadlineHrs={deadlineHrs}
+                setDeadlineHrs={setDeadlineHrs}
+                unwrapToBNB={unwrapToBNB}
+                setUnwrapToBNB={setUnwrapToBNB}
                 onInitiate={onInitiate}
                 creating={creating}
                 dealId={dealId}
@@ -366,8 +740,8 @@ export default function EscrowPage() {
                 needUSDT={needUSDT}
                 feedBNB={!!feedBNB}
                 feedUSDT={!!feedUSDT}
-                usdt={!!usdt}
-                wbnb={!!wbnb}
+                usdt={!!(usdt || usdtRead)}
+                wbnb={!!(wbnb || wbnbRead)}
                 fmt={fmt}
               />
 
@@ -383,7 +757,7 @@ export default function EscrowPage() {
                 partyAOnchain={partyAOnchain}
                 partyBOnchain={partyBOnchain}
                 short={short}
-                isExpired={timeLeft !== null && timeLeft <= 0} // ⬅️ countdown enforcement
+                isExpired={timeLeft !== null && timeLeft <= 0}
               />
             </div>
 
@@ -393,7 +767,7 @@ export default function EscrowPage() {
                 <Chip ok={status.fundedA} label={status.fundedA ? "A Funded" : "A Not Funded"} />
                 <Chip ok={status.fundedB} label={status.fundedB ? "B Funded" : "B Not Funded"} />
                 <Chip ok={status.settled} label={status.settled ? "Contract Complete" : "Waiting…"} />
-                <CountdownChip seconds={timeLeft} /> {/* ⬅️ live countdown chip */}
+                <CountdownChip seconds={timeLeft} />
               </div>
             )}
 
@@ -408,9 +782,15 @@ export default function EscrowPage() {
               />
             )}
 
-            {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 px-3 py-2 text-xs">{error}</div>}
+            {error && (
+              <div className="rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 px-3 py-2 text-xs">
+                {error}
+              </div>
+            )}
 
-            <p className="text-[11px] text-slate-500">If a button reverts, double-check the 5 addresses and re-run Compute to refresh amounts. Share this page URL with Party B after creating the deal.</p>
+            <p className="text-[11px] text-slate-500">
+              If a button reverts, double-check the 5 addresses and re-run Compute to refresh amounts. Share this page URL with Party B after creating the deal.
+            </p>
           </div>
         </div>
 
