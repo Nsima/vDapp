@@ -128,7 +128,7 @@ export default function EscrowPage() {
   const [escrowHasCode, setEscrowHasCode] = useState(false);
   const [overrideAddrs, setOverrideAddrs] = useState(false);
 
-  // read provider init
+  // read provider init: injected → VITE_READ_RPC/localStorage READ_RPC → localhost
   useEffect(() => {
     const anyWin = window as any;
     (async () => {
@@ -367,7 +367,7 @@ export default function EscrowPage() {
     syncToURL();
   }, [syncToURL]);
 
-  // OPTIONAL: auto-load addresses from /addresses.json
+  // OPTIONAL: auto-load addresses from /addresses.json (Vite public/)
   useEffect(() => {
     (async () => {
       try {
@@ -381,9 +381,10 @@ export default function EscrowPage() {
         if (!usdtUsdFeed && j.USDT_USD) setUsdtUsdFeed(j.USDT_USD);
       } catch {}
     })();
-  }, []); // run once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // auto-fill from escrow
+  // auto-fill from escrow using READ-ONLY instance, but only if code exists
   const loadFromEscrow = useCallback(async () => {
     if (!escrowAddr || !escrowRead) return;
     if (!(await hasCode(escrowAddr))) {
@@ -444,18 +445,20 @@ export default function EscrowPage() {
     }
   }, [escrow, partyB, deadlineHrs, usdAmount, unwrapToBNB, syncToURL]);
 
-  // compute
+  // compute (can run with read-only feeds/tokens) + on-chain code checks
   const computeNeeds = useCallback(async () => {
     const feedB = feedBNB;
     const feedU = feedUSDT;
     const tUSDT = usdt ?? usdtRead;
     const tWBNB = wbnb ?? wbnbRead;
 
+    // quick structural checks
     if (!escrowAddr || !feedB || !feedU || !tUSDT || !tWBNB) {
       setError("Paste/auto-fill all 5 addresses first");
       return;
     }
 
+    // on-chain code checks
     if (
       !(await hasCode(escrowAddr)) ||
       !(await hasCode(bnbUsdFeed)) ||
@@ -548,7 +551,7 @@ export default function EscrowPage() {
     }
   }, [escrow, usdt, dealId, needUSDT, escrowAddr]);
 
-  // Poll deal (read-only)
+  // Poll deal (READ-ONLY; captures deadline too)
   useEffect(() => {
     let t: any;
     const tick = async () => {
@@ -563,7 +566,14 @@ export default function EscrowPage() {
         });
         setPartyAOnchain(d.partyA);
         setPartyBOnchain(d.partyB);
-        setDeadlineTs(Number(d.deadline));
+
+        // --- NEW: stop countdown when settled, canceled, or Party B funded early ---
+        if (d.settled || d.canceled || d.fundedB) {
+          setDeadlineTs(null);
+          setTimeLeft(null);
+        } else {
+          setDeadlineTs(Number(d.deadline));
+        }
       } catch {}
     };
     if (dealId !== null) {
@@ -603,7 +613,7 @@ export default function EscrowPage() {
     return () => window.clearInterval(id);
   }, [deadlineTs]);
 
-  // balances
+  // balances (prefer wallet provider, fallback to read-only provider)
   const refreshBalances = useCallback(async () => {
     if (!escrowRead || dealId === null || !(usdt || usdtRead) || !(wbnb || wbnbRead) || !(provider || readProvider)) return;
     const d = await escrowRead.deals(dealId);
@@ -642,17 +652,20 @@ export default function EscrowPage() {
   const onLocal = chainId === 31337 || chainId === 1337;
   const activeStep = !connected ? 1 : dealId === null ? 2 : !status.settled ? 3 : 4;
 
-  // mismatch hint
+  // mismatch hint: when link specifies a chain and read RPC is different
   const showReadHint = readChainId !== null && linkChain !== null && readChainId !== linkChain;
 
-  // ---- LOCK STATES ----
-  const lockEscrow = viewOnly; // lock entire form in deal mode for escrow input
-  const lockDeps = (escrowHasCode && !overrideAddrs) || viewOnly; // lock derived deps
+  // ---- NEW: compute lock states & reason ----
+  const lockEscrow = viewOnly; // when arriving via ?deal=
+  const lockDeps = (escrowHasCode && !overrideAddrs) || viewOnly;
   const lockReason = viewOnly
     ? "Deal link — addresses locked for audit"
     : escrowHasCode
     ? "Addresses are derived from the escrow. Unlock to override."
     : "";
+
+  // hide countdown when B funded or settled/canceled
+  const showCountdown = !status.fundedB && !status.settled;
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden bg-slate-950 text-slate-100">
@@ -705,9 +718,9 @@ export default function EscrowPage() {
               loadFromEscrow={loadFromEscrow}
               copyShare={copyShare}
               copied={copied}
-              escrow={escrowRead || escrow}
+              escrow={escrowRead || escrow} // enable "Auto-fill" even pre-connect
 
-              // LOCKING
+              // NEW props ↓
               readOnlyEscrow={lockEscrow}
               readOnlyDeps={lockDeps}
               disabledReason={lockReason}
@@ -767,7 +780,7 @@ export default function EscrowPage() {
                 <Chip ok={status.fundedA} label={status.fundedA ? "A Funded" : "A Not Funded"} />
                 <Chip ok={status.fundedB} label={status.fundedB ? "B Funded" : "B Not Funded"} />
                 <Chip ok={status.settled} label={status.settled ? "Contract Complete" : "Waiting…"} />
-                <CountdownChip seconds={timeLeft} />
+                {showCountdown && <CountdownChip seconds={timeLeft} />}
               </div>
             )}
 
