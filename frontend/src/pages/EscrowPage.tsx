@@ -64,6 +64,10 @@ function short(addr?: string) {
 // Main Page
 // -----------------------------
 export default function EscrowPage() {
+  
+  useEffect(() => {
+    document.title = "Vessel Wallet — Escrow";
+  }, []);
   // read-only provider (works pre-connect)
   const [readProvider, setReadProvider] = useState<ethers.BrowserProvider | ethers.JsonRpcProvider | null>(null);
 
@@ -130,7 +134,7 @@ export default function EscrowPage() {
   const [overrideAddrs, setOverrideAddrs] = useState(false);
 
   // read provider init: injected → VITE_READ_RPC/localStorage READ_RPC → localhost
-  useEffect(() => {
+  useEffect(() => { 
     const anyWin = window as any;
     (async () => {
       try {
@@ -678,7 +682,12 @@ export default function EscrowPage() {
       </div>
 
       <div className="relative mx-auto max-w-5xl px-6 py-10">
-        <Header onLocal={onLocal} chainId={chainId} activeStep={activeStep} />
+        <Header 
+          onLocal={onLocal} 
+          chainId={chainId} 
+          activeStep={activeStep}
+          title="Vessel Wallet — Escrow" 
+        />
 
         {showReadHint && (
           <div className="mt-3 rounded-lg border border-amber-400/30 bg-amber-500/10 text-amber-200 px-3 py-2 text-xs">
