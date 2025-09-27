@@ -1,0 +1,40 @@
+SWIFT TRANSFER CONFIRMATION
+------------------------------------------------------------------------
+Transaction ref:  MT103E898D1FFC714
+Message ref:      MSGCEBC7B23AD23
+Processing UTC:   2025-09-23T11:43:08+00:00
+------------------------------------------------------------------------
+Ordering / Sender:
+  Name:     MEDEVI GMBH
+  IBAN:     ****************464000
+  Bank:     Deutsche Bank AG (DEUTDEDB101)
+  Bank Addr: Bahnhofstr. 6, 12555 Berlin – Köpenick, Germany
+
+Beneficiary / Receiver:
+  Name:     SEEM Beteiligungs GmbH
+  IBAN:     ****************680000
+  Bank:     Volksbank Rhein Ruhr (GENODED1VRR)
+  Bank Addr: Am Innenhafen 8-10, 47059 Duisburg
+------------------------------------------------------------------------
+Amount:           €10,000,000.00 EUR
+Value date:       2025-09-23
+Purpose:          Investment funding
+------------------------------------------------------------------------
+Settlement status: SUCCESSFUL
+------------------------------------------------------------------------
+
+SUMMARY MT103 BLOCK:
+------------------------------------------------------------------------
+{1:F01DEUTDEDB1010000000000}
+:20:MT103E898D1FFC714
+:23B:CRED
+:32A:250923EUR10000000,00
+:50K:/DE21 1007 0124 0156 4640 00
+MEDEVI GMBH
+Deutsche Bank AG
+:59:/DE70 3506 0386 1199 6800 00
+SEEM Beteiligungs GmbH
+:70:Investment funding
+:71A:SHA
+{CHK:CHK00818DD20EDD}
+------------------------------------------------------------------------
