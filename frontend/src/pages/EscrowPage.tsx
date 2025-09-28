@@ -12,6 +12,8 @@ import BalancesPanel from "../components/BalancesPanel";
 import CountdownChip from "../components/CountdownChip";
 import AbiPanel from "../components/AbiPanel";
 
+console.log("Reached");
+console.info("env", (import.meta as any).env.VITE_READ_RPC, (import.meta as any).env.VITE_TARGET_CHAIN_ID);
 // -----------------------------
 // Minimal ABIs
 // -----------------------------
@@ -132,22 +134,65 @@ export default function EscrowPage() {
   // ---- NEW: locking state for address fields ----
   const [escrowHasCode, setEscrowHasCode] = useState(false);
   const [overrideAddrs, setOverrideAddrs] = useState(false);
+  const TARGET_CHAIN_ID = useMemo(() => {
+  const envId = Number((import.meta as any)?.env?.VITE_TARGET_CHAIN_ID);
+    return Number.isFinite(envId) ? envId : linkChain ?? null;
+  }, [linkChain]);
+
+  const ensureChain = useCallback(
+    async (prov: ethers.BrowserProvider | null) => {
+      if (!prov || !TARGET_CHAIN_ID) return;
+      const hexId = "0x" + TARGET_CHAIN_ID.toString(16);
+      try {
+        const net = await prov.getNetwork();
+        if (Number(net.chainId) === TARGET_CHAIN_ID) return;
+
+        await (prov as any).provider.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: hexId }],
+        });
+      } catch (err: any) {
+        // add BSC automatically if unknown
+        if (err?.code === 4902 && TARGET_CHAIN_ID === 56) {
+          await (prov as any).provider.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: "0x38",
+              chainName: "BNB Smart Chain",
+              nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+              rpcUrls: [(import.meta as any)?.env?.VITE_WALLET_RPC || "https://bsc-dataseed.binance.org"],
+              blockExplorerUrls: ["https://bscscan.com"],
+            }],
+          });
+        } else {
+          throw err;
+        }
+      }
+    },
+    [TARGET_CHAIN_ID]
+  );
 
   // read provider init: injected → VITE_READ_RPC/localStorage READ_RPC → localhost
-  useEffect(() => { 
+  useEffect(() => {
     const anyWin = window as any;
     (async () => {
       try {
+        const envRpc =
+          (import.meta as any)?.env?.VITE_READ_RPC ||
+          localStorage.getItem("READ_RPC");
+
+        if (envRpc) {
+          setReadProvider(new ethers.JsonRpcProvider(envRpc));
+          return;
+        }
+
         if (anyWin?.ethereum) {
-          setReadProvider(new ethers.BrowserProvider(anyWin.ethereum)); // no account prompt
+          // only fallback to injected if no explicit read RPC
+          setReadProvider(new ethers.BrowserProvider(anyWin.ethereum));
           return;
         }
       } catch {}
-      const FALLBACK_RPC =
-        (import.meta as any)?.env?.VITE_READ_RPC ||
-        localStorage.getItem("READ_RPC") ||
-        "http://127.0.0.1:8545";
-      setReadProvider(new ethers.JsonRpcProvider(FALLBACK_RPC));
+      setReadProvider(new ethers.JsonRpcProvider("http://127.0.0.1:8545"));
     })();
   }, []);
 
@@ -671,7 +716,7 @@ export default function EscrowPage() {
 
   // hide countdown when B funded or settled/canceled
   const showCountdown = !status.fundedB && !status.settled;
-
+  
   return (
     <div className="relative min-h-screen w-full overflow-hidden bg-slate-950 text-slate-100">
       {/* ornaments */}
@@ -685,8 +730,13 @@ export default function EscrowPage() {
         <Header 
           onLocal={onLocal} 
           chainId={chainId} 
+          readChainId={readChainId}
+          targetChainId={
+            Number((import.meta as any)?.env?.VITE_TARGET_CHAIN_ID) || linkChain || null
+          } 
           activeStep={activeStep}
           title="Vessel Wallet — Escrow" 
+          onSwitchNetwork={provider ? () => ensureChain(provider) : undefined}
         />
 
         {showReadHint && (
@@ -695,7 +745,18 @@ export default function EscrowPage() {
           </div>
         )}
 
-        <ConnectCard connected={connected} onConnect={connect} account={account} chainId={chainId} onLocal={onLocal} error={error} />
+        <ConnectCard 
+          connected={connected} 
+          onConnect={connect} 
+          account={account} 
+          chainId={chainId} 
+          onLocal={onLocal} 
+          error={error} 
+
+          readChainId={readChainId}
+          targetChainId={Number((import.meta as any)?.env?.VITE_TARGET_CHAIN_ID) || linkChain || null}
+          onSwitchNetwork={provider ? () => ensureChain(provider) : undefined}
+        />
 
         {dealId !== null && connected && (
           <div className="mt-3">
