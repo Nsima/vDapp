@@ -564,6 +564,17 @@ export default function EscrowPage() {
     hasCode,
   ]);
 
+  const refundExpired = useCallback(async () => {
+    if (!escrow || dealId === null) return;
+    try {
+      setError("");
+      const tx = await escrow.refundIfExpired(dealId);
+      await tx.wait();
+    } catch (e:any) {
+      setError(e?.shortMessage || e?.message || "Refund failed");
+    }
+  }, [escrow, dealId]);
+
   // fund
   const fundA = useCallback(async () => {
     if (!escrow || dealId === null || needWBNB === null) {
@@ -839,6 +850,8 @@ export default function EscrowPage() {
                 partyBOnchain={partyBOnchain}
                 short={short}
                 isExpired={timeLeft !== null && timeLeft <= 0}
+                settled={status.settled}
+                onRefundExpired={refundExpired}
               />
             </div>
 
