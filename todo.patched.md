@@ -104,7 +104,7 @@ Directory: `scripts/`
     maxPriorityFeePerGas: 2n * GWEI
   });
 
-  // Mine both together (exact ordering you submitted them)
+  // Mine both together (exact ordering submitted them)
   await network.provider.send("evm_mine");
   await network.provider.send("evm_setAutomine", [true]);
   ```
