@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Unlicense
-pragma solidity ^0.6.12;
+pragma solidity ^0.8.20;
 
 interface IERC20 {
     function totalSupply() external view returns (uint256);
@@ -8,36 +8,12 @@ interface IERC20 {
     function allowance(address owner, address spender) external view returns (uint256);
     function approve(address spender, uint256 amount) external returns (bool);
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 }
 
-library SafeMath {
-    function add(uint256 a, uint256 b) internal pure returns (uint256) {
-        uint256 c = a + b;
-        require(c >= a, "SafeMath: addition overflow");
-        return c;
-    }
-    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
-        require(b <= a, "SafeMath: subtraction overflow");
-        uint256 c = a - b;
-        return c;
-    }
-    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
-        if (a == 0) return 0;
-        uint256 c = a * b;
-        require(c / a == b, "SafeMath: multiplication overflow");
-        return c;
-    }
-    function div(uint256 a, uint256 b) internal pure returns (uint256) {
-        require(b > 0, "SafeMath: division by zero");
-        return a / b;
-    }
-}
-
 contract BabyDoge {
-    using SafeMath for uint256;
-
     string public name = "BabyDoge";
     string public symbol = "BabyDoge";
     uint8 public decimals = 9;
@@ -47,8 +23,8 @@ contract BabyDoge {
     mapping(address => mapping(address => uint256)) private _allowances;
 
     address public owner;
-    address public marketingWallet = 0x…;  // often a specified address
-    address public liquidityReceiver = 0x…;  // often another specified address
+    address public marketingWallet = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266; // Example address
+    address public liquidityReceiver = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8; // Example address
 
     uint256 public taxFee = 2;       // 2% reflection / redistribution tax, example
     uint256 public liquidityFee = 3; // 3% liquidity tax, example
@@ -56,13 +32,16 @@ contract BabyDoge {
 
     mapping(address => bool) private _isExcludedFromFee;
 
-    constructor() public {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor() {
         owner = msg.sender;
         _balances[owner] = totalSupply;
         _isExcludedFromFee[owner] = true;
         _isExcludedFromFee[address(this)] = true;
 
-        emit Transfer(address(0), owner, totalSupply);
+        emit Transfer(address(0), owner, totalSupply); // Emit Transfer event
     }
 
     modifier onlyOwner() {
@@ -85,27 +64,27 @@ contract BabyDoge {
 
     function approve(address spender, uint256 amount) public returns (bool) {
         _allowances[msg.sender][spender] = amount;
-        emit Approval(msg.sender, spender, amount);
+        emit Approval(msg.sender, spender, amount); // Emit Approval event
         return true;
     }
 
     function transferFrom(address sender, address recipient, uint256 amount) public returns (bool) {
-        _allowances[sender][msg.sender] = _allowances[sender][msg.sender].sub(amount);
+        _allowances[sender][msg.sender] = _allowances[sender][msg.sender] - amount; // Underflow checked automatically
         _transfer(sender, recipient, amount);
-        emit Approval(sender, msg.sender, _allowances[sender][msg.sender]);
+        emit Approval(sender, msg.sender, _allowances[sender][msg.sender]); // Emit Approval event
         return true;
     }
 
     function _transfer(address sender, address recipient, uint256 amount) internal {
-        require(sender != address(0), "Transfer from zero");
-        require(recipient != address(0), "Transfer to zero");
+        require(sender != address(0), "Transfer from zero address");
+        require(recipient != address(0), "Transfer to zero address");
         require(_balances[sender] >= amount, "Insufficient balance");
 
         uint256 feeAmt = 0;
         if (!_isExcludedFromFee[sender] && !_isExcludedFromFee[recipient]) {
-            uint256 tFee = amount.mul(taxFee).div(100);
-            uint256 lFee = amount.mul(liquidityFee).div(100);
-            uint256 mFee = amount.mul(marketingFee).div(100);
+            uint256 tFee = (amount * taxFee) / 100;
+            uint256 lFee = (amount * liquidityFee) / 100;
+            uint256 mFee = (amount * marketingFee) / 100;
             feeAmt = tFee + lFee + mFee;
 
             // distribute reflection, add liquidity, send marketing
@@ -114,30 +93,28 @@ contract BabyDoge {
             _reflectFee(tFee);
         }
 
-        uint256 transferAmt = amount.sub(feeAmt);
-        _balances[sender] = _balances[sender].sub(amount);
-        _balances[recipient] = _balances[recipient].add(transferAmt);
+        uint256 transferAmt = amount - feeAmt; // Subtraction is safe due to 0.8.x checks
+        _balances[sender] -= amount;
+        _balances[recipient] += transferAmt;
 
-        emit Transfer(sender, recipient, transferAmt);
+        emit Transfer(sender, recipient, transferAmt); // Emit Transfer event
     }
 
     function _takeLiquidity(uint256 tLiquidity) private {
-        _balances[address(this)] = _balances[address(this)].add(tLiquidity);
-        emit Transfer(msg.sender, address(this), tLiquidity);
+        _balances[address(this)] += tLiquidity;
+        emit Transfer(msg.sender, address(this), tLiquidity); // Emit Transfer event
     }
 
     function _takeMarketing(uint256 tMarketing) private {
-        _balances[marketingWallet] = _balances[marketingWallet].add(tMarketing);
-        emit Transfer(msg.sender, marketingWallet, tMarketing);
+        _balances[marketingWallet] += tMarketing;
+        emit Transfer(msg.sender, marketingWallet, tMarketing); // Emit Transfer event
     }
 
     function _reflectFee(uint256 tFee) private {
-        // In many reflection tokens, reflection is done by distributing amongst all holders
-        // But this is just a placeholder
-        totalSupply = totalSupply.sub(tFee);
+        totalSupply -= tFee; // Subtract from totalSupply to reduce the total supply (reflections)
     }
 
-    // owner-only functions to change fees etc.
+    // Owner-only functions to change fees, etc.
     function setTaxFeePercent(uint256 _taxFee) external onlyOwner {
         taxFee = _taxFee;
     }
