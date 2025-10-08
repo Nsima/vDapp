@@ -6,17 +6,7 @@ pragma solidity ^0.8.20;
  * - First fund locks oracle prices; both sides then deposit exact token amounts.
  * - When both funded, settlement auto-cross-delivers (A gets USDT, B gets BNB/WBNB).
  * - A may fund with native BNB (contract wraps to WBNB) or with WBNB via allowance.
- * - Optional unwrap to native BNB for B on payout.
- *
- * Constructor expects:
- *  - wbnb (IWBNB)
- *  - usdt (IERC20)
- *  - feeds: bnbUsd, usdtUsd (Chainlink AggregatorV3Interface)
- *  - maxPriceAge seconds (staleness guard, e.g., 1 hours)
- *
- * Notes:
- *  - USDT on BSC is ERC20 but decimals may be 18 (often) — we read decimals dynamically.
- *  - Set feed addresses for BSC mainnet/testnet as appropriate.
+ * - Optional unwrap to native BNB for B on payout (with fallback to WBNB if BNB send fails).
  */
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -50,14 +40,14 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
     // Immutable configuration
     IWBNB public immutable WBNB;
     IERC20 public immutable USDT;
-    AggregatorV3Interface public immutable BNB_USD;   // BNB/USD price (8d typical)
-    AggregatorV3Interface public immutable USDT_USD;  // USDT/USD price (≈1.00)
-    uint256 public immutable MAX_PRICE_AGE;           // e.g., 3600 seconds
+    AggregatorV3Interface public immutable BNB_USD;   // BNB/USD price
+    AggregatorV3Interface public immutable USDT_USD;  // USDT/USD price
+    uint256 public immutable MAX_PRICE_AGE;           // seconds
 
     uint8 private immutable _wbnbDecimals;
     uint8 private immutable _usdtDecimals;
-    uint8 private immutable _bnbUsdDecimals;   // chainlink feed decimals
-    uint8 private immutable _usdtUsdDecimals;  // chainlink feed decimals
+    uint8 private immutable _bnbUsdDecimals;
+    uint8 private immutable _usdtUsdDecimals;
 
     constructor(
         address wbnb,
@@ -71,12 +61,11 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
         require(maxPriceAgeSeconds > 0, "bad age");
 
         WBNB = IWBNB(wbnb);
-        USDT = IERC20Metadata(usdt);
+        USDT = IERC20(usdt);
         BNB_USD = AggregatorV3Interface(bnbUsdFeed);
         USDT_USD = AggregatorV3Interface(usdtUsdFeed);
         MAX_PRICE_AGE = maxPriceAgeSeconds;
 
-        // decimals
         _wbnbDecimals    = IERC20Metadata(wbnb).decimals();
         _usdtDecimals    = IERC20Metadata(usdt).decimals();
         _bnbUsdDecimals  = BNB_USD.decimals();
@@ -86,22 +75,22 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
     struct Deal {
         address partyA;          // sends BNB/WBNB, receives USDT
         address partyB;          // sends USDT, receives BNB/WBNB
-        uint64  deadline;        // unix time; refunds allowed after if incomplete
-        bool    unwrapToBNB;     // if true, B receives native BNB on settle
+        uint64  deadline;        // unix time
+        bool    unwrapToBNB;     // if true, B receives native BNB
 
-        // USD intents (8d by convention; we normalize to the feed's decimals on the fly)
-        uint96  usdA_8d;         // e.g., $20 => 2_000_000_000
-        uint96  usdB_8d;         // typically same as usdA_8d
+        // USD intents (8d)
+        uint96  usdA_8d;
+        uint96  usdB_8d;
 
         // Oracle snapshot (locked at first funding)
         bool    priceLocked;
-        uint64  priceTime;       // snapshot time
+        uint64  priceTime;
         uint128 bnbUsd;          // feed-scaled
         uint128 usdtUsd;         // feed-scaled
 
-        // Required token amounts (computed at price lock)
-        uint256 needWBNB;        // amount A must fund (in WBNB units)
-        uint256 needUSDT;        // amount B must fund
+        // Required token amounts
+        uint256 needWBNB;        // in WBNB units (18d typical)
+        uint256 needUSDT;
 
         // Funding flags
         bool    fundedA;
@@ -127,9 +116,9 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
     function createDeal(
         address partyB,
         uint64  deadline,
-        uint96  usdA_8d,     // $ for A->B (BNB side), with 8 decimals
-        uint96  usdB_8d,     // $ for B->A (USDT side)
-        bool    unwrapToBNB  // if true, B will receive native BNB
+        uint96  usdA_8d,
+        uint96  usdB_8d,
+        bool    unwrapToBNB
     ) external returns (uint256 id) {
         require(partyB != address(0), "partyB=0");
         require(usdA_8d > 0 && usdB_8d > 0, "bad usd");
@@ -168,10 +157,10 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
         Deal storage d = _openDealOf(id);
         require(msg.sender == d.partyA, "not A");
         require(!d.fundedA, "A funded");
-        _ensurePricesLockedAndTargets(d);
+        _ensurePricesLockedAndTargets(d, id);
 
         require(msg.value == d.needWBNB, "wrong BNB amount");
-        WBNB.deposit{value: msg.value}(); // mints WBNB to this contract
+        WBNB.deposit{value: msg.value}();
         d.fundedA = true;
         emit FundedA(id, msg.sender, msg.value, true);
 
@@ -183,7 +172,7 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
         Deal storage d = _openDealOf(id);
         require(msg.sender == d.partyA, "not A");
         require(!d.fundedA, "A funded");
-        _ensurePricesLockedAndTargets(d);
+        _ensurePricesLockedAndTargets(d, id);
 
         uint256 beforeBal = IERC20(address(WBNB)).balanceOf(address(this));
         IERC20(address(WBNB)).safeTransferFrom(msg.sender, address(this), d.needWBNB);
@@ -200,7 +189,7 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
         Deal storage d = _openDealOf(id);
         require(msg.sender == d.partyB, "not B");
         require(!d.fundedB, "B funded");
-        _ensurePricesLockedAndTargets(d);
+        _ensurePricesLockedAndTargets(d, id);
 
         uint256 beforeBal = USDT.balanceOf(address(this));
         USDT.safeTransferFrom(msg.sender, address(this), d.needUSDT);
@@ -225,7 +214,6 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
 
         d.canceled = true;
         if (d.fundedA) {
-            // refund A's WBNB
             uint256 amt = d.needWBNB;
             d.fundedA = false;
             IERC20(address(WBNB)).safeTransfer(d.partyA, amt);
@@ -263,48 +251,43 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
         require(block.timestamp <= d.deadline, "deadline passed");
     }
 
-    function _ensurePricesLockedAndTargets(Deal storage d) private {
+    function _ensurePricesLockedAndTargets(Deal storage d, uint256 id) private {
         if (d.priceLocked) return;
 
         (uint256 bnbUsd, uint256 bnbTime) = _freshPrice(BNB_USD);
         (uint256 uUsd,  uint256 uTime )  = _freshPrice(USDT_USD);
 
-        // lock
         d.priceLocked = true;
         d.priceTime = uint64(_min(bnbTime, uTime));
         d.bnbUsd = uint128(bnbUsd);
         d.usdtUsd = uint128(uUsd);
-        emit PricesLocked(_dealIdUnsafe(d), bnbUsd, uUsd, d.priceTime);
+        emit PricesLocked(id, bnbUsd, uUsd, d.priceTime);
 
-        // compute required token amounts (ceil to avoid underpay)
         d.needWBNB = _usdToToken(d.usdA_8d, bnbUsd, _bnbUsdDecimals, _wbnbDecimals);
         d.needUSDT = _usdToToken(d.usdB_8d, uUsd,  _usdtUsdDecimals, _usdtDecimals);
         require(d.needWBNB > 0 && d.needUSDT > 0, "zero need");
     }
 
-    // Convert USD(8d) amount to token units with rounding up.
     function _usdToToken(
         uint256 usd_8d,
         uint256 price,           // feed-scaled
         uint8    priceDecimals,  // e.g., 8
         uint8    tokenDecimals   // e.g., 18
     ) private pure returns (uint256) {
-        // Normalize USD to the feed's decimals (most USD feeds are 8 already).
-        // If your usd_8d is 8d, and price is priceDecimals, bring usd_8d to priceDecimals first.
         uint256 usdScaled = (priceDecimals >= 8)
             ? usd_8d * (10 ** (priceDecimals - 8))
             : usd_8d / (10 ** (8 - priceDecimals));
-
-        // tokens = ceil( usdScaled * 10^tokenDecimals / price )
         uint256 num = usdScaled * (10 ** tokenDecimals);
         return (num + price - 1) / price; // ceilDiv
     }
 
     function _freshPrice(AggregatorV3Interface feed) private view returns (uint256 price, uint256 updatedAt) {
-        (, int256 ans,, uint256 upd,) = feed.latestRoundData();
+        (uint80 rid, int256 ans, , uint256 upd, uint80 ansInRound) = feed.latestRoundData();
         require(ans > 0, "bad price");
+        require(upd > 0, "no upd");
         require(block.timestamp - upd <= MAX_PRICE_AGE, "stale price");
-        price = uint256(ans); // scaled by pDec
+        require(ansInRound >= rid, "stale round");
+        price = uint256(ans);
         updatedAt = upd;
     }
 
@@ -315,24 +298,24 @@ contract UsdEscrow_BNB_USDT is ReentrancyGuard {
         // Payout A: USDT
         USDT.safeTransfer(d.partyA, d.needUSDT);
 
-        // Payout B: WBNB or unwrap to native BNB
+        // Payout B: WBNB or unwrap to native BNB (with fallback)
         if (d.unwrapToBNB) {
             WBNB.withdraw(d.needWBNB);
             (bool ok, ) = d.partyB.call{value: d.needWBNB}("");
-            require(ok, "BNB send fail");
+            if (!ok) {
+                // Re-wrap and send WBNB if BNB transfer fails
+                WBNB.deposit{value: d.needWBNB}();
+                IERC20(address(WBNB)).safeTransfer(d.partyB, d.needWBNB);
+            }
         } else {
             IERC20(address(WBNB)).safeTransfer(d.partyB, d.needWBNB);
         }
-        emit Settled(id, d.needUSDT, d.needWBNB);
-    }
 
-    // Helper: get array index from storage ref (unsafe but fine for events)
-    function _dealIdUnsafe(Deal storage d) private pure returns (uint256 id) {
-        assembly { id := d.slot }
+        emit Settled(id, d.needUSDT, d.needWBNB);
     }
 
     function _min(uint256 a, uint256 b) private pure returns (uint256) { return a < b ? a : b; }
 
-    // accept BNB for WBNB.deposit()
+    // accept BNB for WBNB.deposit() and WBNB.withdraw()
     receive() external payable {}
 }
